@@ -24,8 +24,7 @@ import torchvision.datasets as datasets
 
 import timm
 
-assert timm.__version__ == "0.3.2"  # version check
-import timm.optim.optim_factory as optim_factory
+from timm.optim import param_groups_weight_decay
 
 import util.misc as misc
 from util.misc import NativeScalerWithGradNormCount as NativeScaler
@@ -88,6 +87,13 @@ def get_args_parser():
     parser.add_argument('--start_epoch', default=0, type=int, metavar='N',
                         help='start epoch')
     parser.add_argument('--num_workers', default=10, type=int)
+    parser.add_argument('--compile', action='store_true',
+                        help='Wrap the model with torch.compile (Hopper speedup; slow first step)')
+    parser.add_argument('--bf16', action='store_true',
+                        help='Use bfloat16 autocast instead of fp16 (recommended on Hopper/H200)')
+    parser.set_defaults(bf16=True)
+    parser.add_argument('--fp16', action='store_false', dest='bf16',
+                        help='Use fp16 autocast + GradScaler (legacy behaviour)')
     parser.add_argument('--pin_mem', action='store_true',
                         help='Pin CPU memory in DataLoader for more efficient (sometimes) transfer to GPU.')
     parser.add_argument('--no_pin_mem', action='store_false', dest='pin_mem')
@@ -118,6 +124,9 @@ def main(args):
     np.random.seed(seed)
 
     cudnn.benchmark = True
+    # Hopper/Ampere: allow TF32 for matmul + cudnn for faster fp32-path ops
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
 
     # simple augmentation
     transform_train = transforms.Compose([
@@ -150,6 +159,8 @@ def main(args):
         num_workers=args.num_workers,
         pin_memory=args.pin_mem,
         drop_last=True,
+        persistent_workers=args.num_workers > 0,
+        prefetch_factor=4 if args.num_workers > 0 else None,
     )
     
     # define the model
@@ -171,15 +182,21 @@ def main(args):
     print("accumulate grad iterations: %d" % args.accum_iter)
     print("effective batch size: %d" % eff_batch_size)
 
+    # model_without_ddp stays bound to the original (uncompiled, unwrapped) module so the
+    # optimizer and saved checkpoints use clean keys (no `_orig_mod.`/`module.` prefixes).
+    # torch.compile and DDP both share the same underlying parameter tensors.
+    if args.compile:
+        model = torch.compile(model)
+
     if args.distributed:
-        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu], find_unused_parameters=True)
-        model_without_ddp = model.module
+        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu], find_unused_parameters=False)
     
     # following timm: set wd as 0 for bias and norm layers
-    param_groups = optim_factory.add_weight_decay(model_without_ddp, args.weight_decay)
+    param_groups = param_groups_weight_decay(model_without_ddp, args.weight_decay)
     optimizer = torch.optim.AdamW(param_groups, lr=args.lr, betas=(0.9, 0.95))
     print(optimizer)
-    loss_scaler = NativeScaler()
+    # bf16 has full fp32 dynamic range, so no loss scaling is needed; disable the scaler.
+    loss_scaler = NativeScaler(enabled=not args.bf16)
 
     misc.load_model(args=args, model_without_ddp=model_without_ddp, optimizer=optimizer, loss_scaler=loss_scaler)
 

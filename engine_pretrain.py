@@ -44,7 +44,8 @@ def train_one_epoch(model: torch.nn.Module,
 
         samples = samples.to(device, non_blocking=True)
 
-        with torch.cuda.amp.autocast():
+        amp_dtype = torch.bfloat16 if getattr(args, 'bf16', False) else torch.float16
+        with torch.autocast(device_type='cuda', dtype=amp_dtype):
             loss, _, _ = model(samples, mask_ratio=args.mask_ratio)
 
         loss_value = loss.item()
@@ -58,8 +59,6 @@ def train_one_epoch(model: torch.nn.Module,
                     update_grad=(data_iter_step + 1) % accum_iter == 0)
         if (data_iter_step + 1) % accum_iter == 0:
             optimizer.zero_grad()
-
-        torch.cuda.synchronize()
 
         metric_logger.update(loss=loss_value)
 
