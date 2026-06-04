@@ -243,8 +243,9 @@ def init_distributed_mode(args):
     print('| distributed init (rank {}): {}, gpu {}'.format(
         args.rank, args.dist_url, args.gpu), flush=True)
     torch.distributed.init_process_group(backend=args.dist_backend, init_method=args.dist_url,
-                                         world_size=args.world_size, rank=args.rank)
-    torch.distributed.barrier()
+                                         world_size=args.world_size, rank=args.rank,
+                                         device_id=torch.device('cuda', args.gpu))
+    torch.distributed.barrier(device_ids=[args.gpu])
     setup_for_distributed(args.rank == 0)
 
 
