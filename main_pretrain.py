@@ -102,7 +102,6 @@ def get_args_parser():
     # distributed training parameters
     parser.add_argument('--world_size', default=1, type=int,
                         help='number of distributed processes')
-    parser.add_argument('--local_rank', default=-1, type=int)
     parser.add_argument('--dist_on_itp', action='store_true')
     parser.add_argument('--dist_url', default='env://',
                         help='url used to set up distributed training')
@@ -183,15 +182,12 @@ def main(args):
     print("accumulate grad iterations: %d" % args.accum_iter)
     print("effective batch size: %d" % eff_batch_size)
 
-    # model_without_ddp stays bound to the original (uncompiled, unwrapped) module so the
-    # optimizer and saved checkpoints use clean keys (no `_orig_mod.`/`module.` prefixes).
-    # torch.compile and DDP both share the same underlying parameter tensors.
-    if args.compile:
-        model = torch.compile(model)
-
     if args.distributed:
         model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu], find_unused_parameters=False)
     
+    if args.compile:
+        model = torch.compile(model)
+
     # following timm: set wd as 0 for bias and norm layers
     param_groups = param_groups_weight_decay(model_without_ddp, args.weight_decay)
     optimizer = torch.optim.AdamW(param_groups, lr=args.lr, betas=(0.9, 0.95))
@@ -213,6 +209,7 @@ def main(args):
             args=args
         )
         if args.output_dir and (epoch % 20 == 0 or epoch + 1 == args.epochs):
+            # Unwrap the compiled model for checkpointing.
             misc.save_model(
                 args=args, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer,
                 loss_scaler=loss_scaler, epoch=epoch)
